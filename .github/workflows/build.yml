@@ -1,0 +1,88 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 1. Unzip project
+        run: unzip -q localnet.zip -d app
+
+      - name: 2. Install packages
+        working-directory: app
+        run: |
+          npm install --legacy-peer-deps
+          npx expo install --fix -- --legacy-peer-deps || echo "expo install --fix skipped"
+
+      - name: 3. Fix Background Actions Android Code
+        run: |
+          FILE="app/node_modules/react-native-background-actions/android/src/main/java/com/asterinet/react/bgactions/RNBackgroundActionsTask.java"
+          if [ -f "$FILE" ]; then
+            sed -i 's/ServiceCompat.startForeground(/#ServiceCompat.startForeground(/g' "$FILE" || true
+            echo "Background actions file patched successfully"
+          fi
+
+      - name: 4. Check app config and JS code
+        working-directory: app
+        run: |
+          set -o pipefail
+          npx expo config --type public > /dev/null
+          npx expo export --platform android --output-dir /tmp/jsout 2>&1 | tee ../js-check.log
+
+      - name: 5. Create Android project
+        working-directory: app
+        run: |
+          set -o pipefail
+          npx expo prebuild --platform android --no-install 2>&1 | tee ../prebuild.log
+
+      - name: 6. Build APK
+        working-directory: app/android
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon --warning-mode none \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            -PreactNativeArchitectures=arm64-v8a,armeabi-v7a 2>&1 | tee ../../build.log
+
+      - name: Show the error (only if something failed)
+        if: failure()
+        run: |
+          {
+            echo "## Build failed. Send this text to Claude"
+            for f in js-check.log prebuild.log build.log; do
+              if [ -f "$f" ]; then
+                echo "### $f"
+                echo '```'
+                (grep -n -E -A 14 "What went wrong|Error:|error:|Unable to resolve|SyntaxError|ERR!" "$f" \vert{}\vert{} tail -n 40 "$f") | head -n 70
+                echo '```'
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save full logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            js-check.log
+            prebuild.log
+            build.log
+          if-no-files-found: ignore
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalNet-Connect-APK
+          path: app/android/app/build/outputs/apk/release/*.apk
