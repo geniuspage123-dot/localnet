@@ -1,0 +1,127 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 1. Unzip project
+        run: unzip -q localnet.zip -d app
+
+      - name: 2. Install packages
+        working-directory: app
+        run: |
+          npm install --legacy-peer-deps
+          npx expo install --fix -- --legacy-peer-deps || echo "expo install --fix skipped"
+
+      - name: 2b. Fix bugs inside react-native-background-actions
+        working-directory: app
+        run: |
+          npm ls react-native-background-actions || true
+          python3 - <<'PY'
+          import re, glob
+          CALL = 'ServiceCompat.startForeground('
+          for f in glob.glob('node_modules/react-native-background-actions/android/src/main/java/**/*.java', recursive=True):
+              text = open(f).read()
+              orig = text
+              # 1) remove the stray '#' typo
+              text = re.sub(r'^([ \t]*)#[ \t]*(?=ServiceCompat)', r'\1', text, flags=re.M)
+              # 2) old androidx.core has no ServiceCompat.startForeground -> use the normal Service API
+              while True:
+                  k = text.find(CALL)
+                  if k < 0:
+                      break
+                  p = k + len(CALL)
+                  depth, start, parts, end = 0, p, [], None
+                  for n in range(p, len(text)):
+                      c = text[n]
+                      if c == '(':
+                          depth += 1
+                      elif c == ')':
+                          if depth == 0:
+                              parts.append(text[start:n].strip())
+                              end = n + 1
+                              break
+                          depth -= 1
+                      elif c == ',' and depth == 0:
+                          parts.append(text[start:n].strip())
+                          start = n + 1
+                  if end is None or len(parts) != 4:
+                      print('COULD NOT PARSE call in', f)
+                      break
+                  svc, nid, note, _ = parts
+                  repl = ('if (android.os.Build.VERSION.SDK_INT >= 29) { '
+                          + svc + '.startForeground(' + nid + ', ' + note + ', android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST); '
+                          + '} else { ' + svc + '.startForeground(' + nid + ', ' + note + '); }')
+                  text = text[:k] + repl + text[end:]
+              if text != orig:
+                  open(f, 'w').write(text)
+                  print('PATCHED', f)
+          PY
+          echo "---- patched code ----"
+          grep -rn -B3 -A4 "startForeground" node_modules/react-native-background-actions/android/src/main/java || true
+
+      - name: 3. Check app config and JS code
+        working-directory: app
+        run: |
+          set -o pipefail
+          npx expo config --type public > /dev/null
+          npx expo export --platform android --output-dir /tmp/jsout 2>&1 | tee ../js-check.log
+
+      - name: 4. Create Android project
+        working-directory: app
+        run: |
+          set -o pipefail
+          npx expo prebuild --platform android --no-install 2>&1 | tee ../prebuild.log
+
+      - name: 5. Build APK
+        working-directory: app/android
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon --warning-mode none \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            -PreactNativeArchitectures=arm64-v8a,armeabi-v7a 2>&1 | tee ../../build.log
+
+      - name: Show the error (only if something failed)
+        if: failure()
+        run: |
+          {
+            echo "## Build failed. Send this text to Claude"
+            for f in js-check.log prebuild.log build.log; do
+              if [ -f "$f" ]; then
+                echo "### $f"
+                echo '```'
+                (grep -n -E -A 14 "What went wrong|Error:|error:|Unable to resolve|SyntaxError|ERR!" "$f" || tail -n 40 "$f") | head -n 70
+                echo '```'
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save full logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            js-check.log
+            prebuild.log
+            build.log
+          if-no-files-found: ignore
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalNet-Connect-APK
+          path: app/android/app/build/outputs/apk/release/*.apk
