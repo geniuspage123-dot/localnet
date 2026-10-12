@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,7 +30,15 @@ jobs:
       - name: Build APK
         working-directory: app/android
         run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - name: Rename APK
+        run: cp app/android/app/build/outputs/apk/release/*.apk LocalNet-Connect.apk
       - uses: actions/upload-artifact@v4
         with:
           name: LocalNet-Connect-APK
-          path: app/android/app/build/outputs/apk/release/*.apk
+          path: LocalNet-Connect.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: LocalNet Connect build ${{ github.run_number }}
+          files: LocalNet-Connect.apk
