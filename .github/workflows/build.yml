@@ -8,6 +8,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,28 +18,75 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Unzip project
+
+      - name: 1. Unzip project
         run: unzip -q localnet.zip -d app
-      - name: Install packages
+
+      - name: 2. Install packages
         working-directory: app
         run: |
           npm install --legacy-peer-deps
-          npx expo install --fix -- --legacy-peer-deps
-      - name: Create Android project
+          npx expo install --fix -- --legacy-peer-deps || echo "expo install --fix skipped"
+
+      - name: 3. Check app config and JS code
         working-directory: app
-        run: npx expo prebuild --platform android --no-install
-      - name: Build APK
+        run: |
+          set -o pipefail
+          npx expo config --type public > /dev/null
+          npx expo export --platform android --output-dir /tmp/jsout 2>&1 | tee ../js-check.log
+
+      - name: 4. Create Android project
+        working-directory: app
+        run: |
+          set -o pipefail
+          npx expo prebuild --platform android --no-install 2>&1 | tee ../prebuild.log
+
+      - name: 5. Build APK
         working-directory: app/android
-        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
-      - name: Rename APK
-        run: cp app/android/app/build/outputs/apk/release/*.apk LocalNet-Connect.apk
-      - uses: actions/upload-artifact@v4
+        run: |
+          set -o pipefail
+          ./gradlew assembleRelease --no-daemon --warning-mode none \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            -PreactNativeArchitectures=arm64-v8a,armeabi-v7a 2>&1 | tee ../../build.log
+
+      - name: Show the error (only if something failed)
+        if: failure()
+        run: |
+          {
+            echo "## Build failed. Send this text to Claude"
+            for f in js-check.log prebuild.log build.log; do
+              if [ -f "$f" ]; then
+                echo "### $f"
+                echo '```'
+                (grep -n -E -A 14 "What went wrong|Error:|error:|Unable to resolve|SyntaxError|ERR!" "$f" || tail -n 40 "$f") | head -n 70
+                echo '```'
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save full logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: LocalNet-Connect-APK
-          path: LocalNet-Connect.apk
+          name: build-logs
+          path: |
+            js-check.log
+            prebuild.log
+            build.log
+          if-no-files-found: ignore
+
+      - name: Rename APK
+        run: cp app/android/app/build/outputs/apk/release/*.apk UnitedApp.apk
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnitedApp-APK
+          path: UnitedApp.apk
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: LocalNet Connect build ${{ github.run_number }}
-          files: LocalNet-Connect.apk
+          name: UnitedApp build ${{ github.run_number }}
+          files: UnitedApp.apk
