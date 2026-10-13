@@ -3,8 +3,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
-permissions:
-  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -75,18 +73,8 @@ jobs:
             build.log
           if-no-files-found: ignore
 
-      - name: Rename APK
-        run: cp app/android/app/build/outputs/apk/release/*.apk UnitedApp.apk
-
       - name: Save APK
         uses: actions/upload-artifact@v4
         with:
           name: UnitedApp-APK
-          path: UnitedApp.apk
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: UnitedApp build ${{ github.run_number }}
-          files: UnitedApp.apk
+          path: app/android/app/build/outputs/apk/release/*.apk
